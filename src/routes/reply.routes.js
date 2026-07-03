@@ -31,16 +31,16 @@
  */
 
 import { Router } from 'express';
-import { contextStore }      from '../stores/context.store.js';
-import { search }            from '../services/retrieval.service.js';
-import { buildReplyPrompt }  from '../prompts/prompt.builder.js';
+import { contextStore } from '../stores/context.store.js';
+import { search } from '../services/retrieval.service.js';
+import { buildReplyPrompt } from '../prompts/prompt.builder.js';
 import {
   generateReply,
   GeminiError,
   ValidationError,
   JsonParseError,
 } from '../services/gemini.service.js';
-import { logger }            from '../utils/logger.js';
+import { logger } from '../utils/logger.js';
 
 const router = Router();
 
@@ -67,7 +67,7 @@ router.post('/reply', async (req, res) => {
   );
   if (missing.length > 0) {
     return res.status(400).json({
-      error:   'Missing required fields',
+      error: 'Missing required fields',
       missing,
     });
   }
@@ -75,14 +75,88 @@ router.post('/reply', async (req, res) => {
   const {
     conversation_id,
     merchant_id,
-    customer_id        = null,
+    customer_id = null,
     from_role,
     message,
     received_at,
     turn_number,
     conversation_history = [],
-    trigger_id         = null,
+    trigger_id = null,
   } = body;
+
+
+  // ─────────────────────────────────────────────────────────────
+  // Fast-path decisions (avoid unnecessary Gemini calls)
+  // ─────────────────────────────────────────────────────────────
+
+  const normalized = message.toLowerCase().trim();
+
+  // Automatic replies
+  const AUTO_REPLY_PATTERNS = [
+    "thank you for contacting",
+    "thank you for your message",
+    "we will get back",
+    "we'll get back",
+    "our team will respond",
+    "automated response",
+    "auto reply",
+    "out of office",
+    "received your request",
+  ];
+
+  // Hostile / opt-out
+  const HOSTILE_PATTERNS = [
+    "stop messaging",
+    "stop contacting",
+    "leave me alone",
+    "spam",
+    "not interested",
+    "don't message",
+    "dont message",
+    "unsubscribe",
+  ];
+
+  // Merchant already committed
+  const COMMIT_PATTERNS = [
+    "ok",
+    "okay",
+    "yes",
+    "yeah",
+    "yep",
+    "let's do it",
+    "lets do it",
+    "what's next",
+    "whats next",
+    "go ahead",
+    "please proceed",
+    "sounds good",
+  ];
+
+  // Fast-path: auto reply
+  if (AUTO_REPLY_PATTERNS.some(p => normalized.includes(p))) {
+    return res.status(200).json({
+      action: "end",
+      rationale: "Detected automated acknowledgement."
+    });
+  }
+
+  // Fast-path: hostile
+  if (HOSTILE_PATTERNS.some(p => normalized.includes(p))) {
+    return res.status(200).json({
+      action: "end",
+      rationale: "Merchant requested no further communication."
+    });
+  }
+
+  // Fast-path: merchant committed
+  if (COMMIT_PATTERNS.some(p => normalized.includes(p))) {
+    return res.status(200).json({
+      action: "send",
+      body: "Great! I'll prepare the next step and guide you through the process.",
+      cta: "open_ended",
+      rationale: "Merchant has already committed and is ready to proceed."
+    });
+  }
 
   logger.info('reply_start', {
     conversation_id,
@@ -102,7 +176,7 @@ router.post('/reply', async (req, res) => {
 
   // ── 3. Load category (optional) ─────────────────────────────────────────────
 
-  const categorySlug   = merchantPayload?.category_slug;
+  const categorySlug = merchantPayload?.category_slug;
   const categoryRecord = categorySlug
     ? contextStore.get('category', categorySlug)
     : undefined;
@@ -110,14 +184,14 @@ router.post('/reply', async (req, res) => {
 
   // ── 4. Load trigger context (optional) ──────────────────────────────────────
 
-  const triggerRecord  = trigger_id
+  const triggerRecord = trigger_id
     ? contextStore.get('trigger', trigger_id)
     : undefined;
   const triggerPayload = triggerRecord?.payload ?? null;
 
   // ── 5. Load customer context (optional) ─────────────────────────────────────
 
-  const customerRecord  = customer_id
+  const customerRecord = customer_id
     ? contextStore.get('customer', customer_id)
     : undefined;
   const customerPayload = customerRecord?.payload ?? null;
@@ -130,7 +204,7 @@ router.post('/reply', async (req, res) => {
     triggerPayload?.kind ?? '',
     categorySlug ?? '',
   ].filter(Boolean);
-  const query     = queryParts.join(' ');
+  const query = queryParts.join(' ');
   const knowledge = search(query, { category: categorySlug, limit: 5 });
 
   logger.info('reply_retrieval', {
@@ -142,13 +216,13 @@ router.post('/reply', async (req, res) => {
   // ── 7. Build reply prompt ───────────────────────────────────────────────────
 
   const prompt = buildReplyPrompt({
-    merchant:            merchantPayload,
-    category:            categoryPayload,
-    trigger:             triggerPayload,
-    customer:            customerPayload,
-    fromRole:            from_role,
-    incomingMessage:     message,
-    turnNumber:          turn_number,
+    merchant: merchantPayload,
+    category: categoryPayload,
+    trigger: triggerPayload,
+    customer: customerPayload,
+    fromRole: from_role,
+    incomingMessage: message,
+    turnNumber: turn_number,
     conversationHistory: Array.isArray(conversation_history) ? conversation_history : [],
     knowledge,
   });

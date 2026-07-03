@@ -132,7 +132,7 @@ function formatConversation(history = []) {
     return history
         .map((turn, i) => {
             const speaker = turn.from ?? turn.from_role ?? 'unknown';
-            const text    = turn.msg ?? turn.body ?? turn.message ?? '';
+            const text = turn.msg ?? turn.body ?? turn.message ?? '';
             return `Turn ${i + 1} [${speaker}]: ${text}`;
         })
         .join('\n');
@@ -158,9 +158,9 @@ function formatConversation(history = []) {
  */
 export function buildReplyPrompt({
     merchant,
-    category   = null,
-    trigger    = null,
-    customer   = null,
+    category = null,
+    trigger = null,
+    customer = null,
     fromRole,
     incomingMessage,
     turnNumber,
@@ -173,20 +173,31 @@ export function buildReplyPrompt({
 
     parts.push(
         section(
-            'TASK',
+            "TASK",
             [
-                'You are mid-conversation with a merchant or customer who has just replied.',
-                'Decide the BEST next move: send a follow-up message, wait, or end the conversation.',
-                'Use only the supplied context.',
-                'Remain fully grounded.',
-            ].join('\n'),
-        ),
+                "You are continuing an existing conversation.",
+                "",
+                "Your primary objective is NOT to keep the conversation alive.",
+                "",
+                "Your primary objective is to choose the MOST APPROPRIATE next action.",
+                "",
+                "Sometimes the correct decision is SEND.",
+                "Sometimes the correct decision is WAIT.",
+                "Sometimes the correct decision is END.",
+                "",
+                "Continue the conversation ONLY if it creates value for the merchant.",
+                "",
+                "Avoid unnecessary clarification questions.",
+                "Avoid prolonging conversations.",
+                "Remain fully grounded in the supplied context."
+            ].join("\n")
+        )
     );
 
     parts.push(section('MERCHANT CONTEXT', formatObject(merchant)));
 
     if (category) parts.push(section('CATEGORY CONTEXT', formatObject(category)));
-    if (trigger)  parts.push(section('TRIGGER CONTEXT',  formatObject(trigger)));
+    if (trigger) parts.push(section('TRIGGER CONTEXT', formatObject(trigger)));
     if (customer) parts.push(section('CUSTOMER CONTEXT', formatObject(customer)));
 
     parts.push(
@@ -207,9 +218,175 @@ export function buildReplyPrompt({
 
     parts.push(
         section(
-            'RULES',
-            `- Use only supplied information.\n- Never hallucinate.\n- Return only valid JSON.\n- Choose exactly one action: send, wait, or end.\n- No markdown. No explanations.`.trim(),
-        ),
+            "CONVERSATION DECISION RULES",
+            `
+Choose exactly ONE action:
+
+- send
+- wait
+- end
+
+1. Automatic Replies
+
+If the incoming message is clearly an automatic acknowledgement, auto responder, or system-generated reply such as:
+
+- Thank you for contacting us
+- We have received your request
+- Our team will respond shortly
+- This is an automated response
+
+Do NOT continue the conversation.
+
+Prefer:
+
+{
+  "action":"end"
+}
+
+or
+
+{
+  "action":"wait"
+}
+
+--------------------------------------------------
+
+2. Merchant Commitment
+
+If the merchant says:
+
+- yes
+- ok
+- sounds good
+- let's do it
+- what's next
+- please proceed
+
+Immediately transition into execution.
+
+Do NOT ask unnecessary questions.
+
+Provide the next step.
+
+--------------------------------------------------
+
+3. Hostile Messages
+
+If the merchant says:
+
+- stop messaging me
+- spam
+- leave me alone
+- not interested
+- don't contact me again
+
+Immediately end the conversation politely.
+
+Never attempt another sales message.
+
+--------------------------------------------------
+
+4. Direct Questions
+
+If the merchant asks a direct question,
+
+answer it first.
+
+--------------------------------------------------
+
+5. Existing Context
+
+If enough information already exists,
+
+never ask for information already available.
+
+--------------------------------------------------
+
+6. Grounding
+
+Never invent:
+
+- offers
+- merchant metrics
+- discounts
+- research
+- customer information
+
+Use ONLY supplied context.
+
+--------------------------------------------------
+
+Return ONLY valid JSON.
+
+No markdown.
+
+No explanations.
+`.trim()
+        )
+    );
+    parts.push(
+        section(
+            "EXAMPLES",
+            `
+Example 1
+
+Merchant:
+"Thank you for contacting us. Our team will respond shortly."
+
+Correct:
+
+{
+  "action":"end",
+  "rationale":"This is an automatic acknowledgement."
+}
+
+--------------------------------------------------
+
+Example 2
+
+Merchant:
+"Ok let's do it."
+
+Correct:
+
+{
+  "action":"send",
+  "body":"Great! Here's the next step...",
+  "cta":"open_ended",
+  "rationale":"Merchant has already committed."
+}
+
+--------------------------------------------------
+
+Example 3
+
+Merchant:
+"Stop messaging me."
+
+Correct:
+
+{
+  "action":"end",
+  "rationale":"Merchant requested no further communication."
+}
+
+--------------------------------------------------
+
+Example 4
+
+Merchant:
+"Can I offer 20% instead?"
+
+Correct:
+
+{
+  "action":"send",
+  "body":"Yes, you can update your offer...",
+  "cta":"open_ended",
+  "rationale":"Merchant asked a direct operational question."
+}
+`
+        )
     );
 
     parts.push(
