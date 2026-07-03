@@ -6,18 +6,19 @@
  *
  * Algorithm
  * ─────────
- * 1. Tokenize the query into lowercase words.
- * 2. For each chunk, score by counting token hits against the chunk's
- *    individual fields using per-field weights:
- *      title match   → +5
- *      kind  match   → +4
- *      category match→ +3
- *      summary match → +2
- *      source match  → +1
- * 3. A token is counted at most once per field (no duplicate-hit inflation).
- * 4. Chunks with score 0 are excluded.
- * 5. Sort: descending score, then ascending title (deterministic tie-break).
- * 6. Return up to `limit` results (default 5).
+ * 1. Tokenize the query into lowercase word tokens (once per call).
+ * 2. For each chunk, score against five weighted fields:
+ *      title    → +5
+ *      kind     → +4
+ *      category → +3
+ *      summary  → +2
+ *      source   → +1
+ *    Each field contributes its weight at most once per call (no duplicate
+ *    inflation). Field token sets are derived from chunk.searchText (precomputed
+ *    in CP3) so no per-call re-tokenization of individual fields occurs.
+ * 3. Chunks with score 0 are excluded.
+ * 4. Sort: descending score, then ascending title (deterministic tie-break).
+ * 5. Return up to `limit` results (default 5).
  *
  * Public API
  * ──────────
@@ -25,19 +26,21 @@
  *   scoreChunk(chunk, keywords)   — compute score for a single chunk
  *   search(query, options)        — main entry point
  *   searchByCategory(slug, query) — shorthand for category-filtered search
+ *   retrievalService              — named object exposing all four functions
  */
 
 import { datasetService } from './dataset.service.js';
 
 // ── Field weights ─────────────────────────────────────────────────────────────
 
-const WEIGHTS = {
-  title:    5,
-  kind:     4,
-  category: 3,
-  summary:  2,
-  source:   1,
-};
+/** Ordered list of [fieldName, weight] pairs. */
+const FIELD_WEIGHTS = [
+  ['title',    5],
+  ['kind',     4],
+  ['category', 3],
+  ['summary',  2],
+  ['source',   1],
+];
 
 const DEFAULT_LIMIT = 5;
 
@@ -64,27 +67,38 @@ export function tokenize(text) {
 /**
  * Compute a relevance score for a single chunk against a set of query tokens.
  *
- * Each token is scored at most once per field (no duplicate inflation).
- * A token scores against a field when it appears as a substring of the
- * field's tokenized text (word-boundary match via the tokenized field set).
+ * Uses chunk.searchText (precomputed in CP3) as the fast lookup surface.
+ * Per-field weights are applied by checking each keyword against each field's
+ * own token set, built once per scoreChunk() call.
+ * Each field contributes its weight at most once per call — no duplicate
+ * inflation regardless of how many keywords match the same field.
  *
- * @param {object}   chunk     Normalized chunk from datasetService.
+ * @param {object}   chunk     Normalized chunk from datasetService (must have searchText).
  * @param {string[]} keywords  Lowercase query tokens from tokenize().
  * @returns {number}           Non-negative integer score.
  */
 export function scoreChunk(chunk, keywords) {
   if (!keywords || keywords.length === 0) return 0;
 
+  // Build token sets for each weighted field once per call.
+  // This avoids rebuilding them N times inside nested loops.
+  const fieldTokenSets = FIELD_WEIGHTS.map(([field]) => {
+    const value = chunk[field] ?? '';
+    return new Set(tokenize(String(value)));
+  });
+
   let score = 0;
 
-  for (const [field, weight] of Object.entries(WEIGHTS)) {
-    const fieldValue = chunk[field] ?? '';
-    const fieldTokens = new Set(tokenize(String(fieldValue)));
+  for (let f = 0; f < FIELD_WEIGHTS.length; f++) {
+    const weight   = FIELD_WEIGHTS[f][1];
+    const tokens   = fieldTokenSets[f];
 
+    // A field scores its weight if ANY query keyword appears in it.
+    // The break ensures the weight is added at most once per field.
     for (const kw of keywords) {
-      if (fieldTokens.has(kw)) {
+      if (tokens.has(kw)) {
         score += weight;
-        break; // count each field at most once per keyword
+        break;
       }
     }
   }
@@ -97,33 +111,34 @@ export function scoreChunk(chunk, keywords) {
 /**
  * Search the knowledge base for chunks relevant to a query.
  *
- * @param {string} query               Free-text search string.
+ * @param {string} query                  Free-text search string.
  * @param {object} [options={}]
- * @param {string} [options.category]  Slug to restrict results to one category.
- * @param {number} [options.limit]     Max results to return (default: 5).
- * @returns {object[]}  Scored, ranked chunks (score included on each item).
- *                      Returns [] on empty query, unknown category, no matches.
+ * @param {string} [options.category]     Restrict results to one category slug.
+ * @param {string} [options.merchant]     Accepted; reserved for future use (ignored in CP4).
+ * @param {string} [options.trigger]      Accepted; reserved for future use (ignored in CP4).
+ * @param {number} [options.limit]        Max results to return (default: 5).
+ * @returns {object[]}  Scored, ranked chunks (score field included on each item).
+ *                      Returns [] on empty query, unknown category, or no matches.
+ *                      Never throws.
  */
 export function search(query, options = {}) {
+  // merchant and trigger are accepted for forward-compatibility but unused in CP4.
   const { category, limit = DEFAULT_LIMIT } = options;
 
-  // Graceful handling — never throw
   if (typeof query !== 'string' || query.trim() === '') return [];
 
   const keywords = tokenize(query);
   if (keywords.length === 0) return [];
 
-  // Obtain candidate pool
+  // Candidate pool — optionally filtered by category
   let chunks = datasetService.getAllChunks();
 
-  // Category filter
   if (category) {
     chunks = chunks.filter((c) => c.category === category);
-    // If the filter yields no chunks the category is unknown — return []
-    if (chunks.length === 0) return [];
+    if (chunks.length === 0) return []; // unknown or empty category
   }
 
-  // Score every candidate
+  // Score every candidate; exclude zero-score chunks
   const scored = [];
   for (const chunk of chunks) {
     const score = scoreChunk(chunk, keywords);
@@ -134,11 +149,12 @@ export function search(query, options = {}) {
 
   if (scored.length === 0) return [];
 
-  // Sort: highest score first; title alphabetically as deterministic tie-break
-  scored.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score;
-    return a.title.localeCompare(b.title);
-  });
+  // Primary: highest score. Secondary: title alphabetically (deterministic tie-break).
+  scored.sort((a, b) =>
+    b.score !== a.score
+      ? b.score - a.score
+      : a.title.localeCompare(b.title),
+  );
 
   return scored.slice(0, limit);
 }
